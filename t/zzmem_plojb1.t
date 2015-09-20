@@ -23,10 +23,12 @@ for (1..100000) {
     $context->eval('(function(data) { var x = data; })')->(Test->new($_));
 }
 
-1 while !$context->idle_notification;
+$context->eval('gc()');
+#1 while !$context->idle_notification;
 
 SKIP: {
     skip "no ps", 1 unless check_ps();
+    #diag(get_rss());
     ok get_rss() < 50_000, 'objects are released';
 }
 

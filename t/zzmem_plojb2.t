@@ -4,7 +4,7 @@ use utf8;
 use strict;
 use warnings;
 
-use Test::More skip_all => $^V lt v5.10;
+use Test::More;
 
 use FindBin;
 my $context = require "$FindBin::Bin/mem.pl";
@@ -24,7 +24,8 @@ for (1..100000) {
     $context->eval('(function(data) { DATA.push(data); })')->(Test->new($_));
 }
 
-1 while !$context->idle_notification;
+$context->eval('gc()');
+#1 while !$context->idle_notification;
 
 SKIP: {
     skip "no ps", 1 unless check_ps();

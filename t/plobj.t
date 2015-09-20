@@ -1,6 +1,6 @@
 #!/usr/bin/perl
 
-use Test::More skip_all => $^V lt v5.10;
+use Test::More;
 use Data::Dumper;
 use JavaScript::V8;
 
@@ -109,7 +109,8 @@ $context->set_flags_from_string("--expose-gc");
         $c->{on_destroy} = sub { $destroyed = 1 };
         $context->eval('(function(c) { C = c })')->($c);
     }
-    1 while !$context->idle_notification;
+    $context->eval('gc()');
+    #1 while !$context->idle_notification;
 
     ok !$destroyed, 'global js object is kept alive when perl scope is done';
     is $context->eval('C')->get, 42, 'proper value is retained';
@@ -123,7 +124,8 @@ $context->set_flags_from_string("--expose-gc");
         $c->{on_destroy} = sub { $destroyed = 1 };
         $context->eval('(function(c) { return c.get() + 1; })')->($c);
     }
-    1 while !$context->idle_notification;
+    $context->eval('gc()');
+    #1 while !$context->idle_notification;
 
     ok $destroyed, 'local js object is destroyed after perl scope is done';
 }

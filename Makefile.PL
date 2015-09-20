@@ -23,7 +23,7 @@ my %mm = (
     }, # e.g., Module::Name => 1.1
     ABSTRACT_FROM  => 'lib/JavaScript/V8.pm', # retrieve abstract from module
     AUTHOR         => 'Pawel Murias <pawelmurias@gmail.org>',
-    LIBS              => [($V8_DIR ? "-L$V8_DIR " : '') . '-lv8'], # e.g., '-lm'
+    LIBS              => [($V8_DIR ? "-L$V8_DIR " : '') . '-lv8 -lv8_libplatform'], # e.g., '-lm'
     DEFINE            => '', # e.g., '-DHAVE_SOMETHING'
     INC               => '-I.' . ($V8_DIR ? " -I$V8_DIR/include" : ''), # e.g., '-I. -I/usr/include/other'
     OBJECT            => '$(O_FILES)', # link all the C files too
@@ -43,7 +43,7 @@ if(ExtUtils::MakeMaker->can("VERSION") && ExtUtils::MakeMaker->VERSION(6.46)) {
 }
 
 if(gcc_version($CC) >= 4.5) {
-  $mm{CCFLAGS} = '-fpermissive';
+  $mm{CCFLAGS} = '-fpermissive -std=c++0x';
 }
 
 WriteMakefile(%mm);

@@ -14,7 +14,8 @@ for (1..200000) {
     $context->eval('(function(data) { var x = data; })')->(sub { 1 });
 }
 
-1 while !$context->idle_notification;
+$context->eval('gc()');
+#1 while !$context->idle_notification;
 
 SKIP: {
     skip "no ps", 1 unless check_ps();

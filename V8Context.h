@@ -1,6 +1,7 @@
 #ifndef _V8Context_h_
 #define _V8Context_h_
 
+#include <libplatform/libplatform.h>
 #include <v8.h>
 
 #include <vector>
@@ -23,14 +24,14 @@ extern "C" {
 using namespace v8;
 using namespace std;
 
-typedef map<string, Persistent<Object> > ObjectMap;
+typedef map<string, Persistent<Object> *> ObjectMap;
 
 class SimpleObjectData {
 public:
-    Handle<Object> object;
+    Local<Object> object;
     long ptr;
 
-    SimpleObjectData(Handle<Object> object_, long ptr_)
+    SimpleObjectData(Local<Object> object_, long ptr_)
         : object(object_)
         , ptr(ptr_)
     { }
@@ -48,11 +49,11 @@ public:
             delete it->second;
     }
 
-    void add(Handle<Object> object, long ptr);
-    SV* find(Handle<Object> object);
+    void add(Local<Object> object, long ptr);
+    SV* find(Local<Object> object);
 };
 
-typedef map<int, Handle<Value> > HandleMap;
+typedef map<int, Local<Value> > HandleMap;
 
 class V8Context;
 
@@ -63,14 +64,13 @@ public:
     SV* sv;
     long ptr;
 
-    ObjectData() {};
-    ObjectData(V8Context* context_, Handle<Object> object_, SV* sv);
+    ObjectData(V8Context* context_, Local<Object> object_, SV* sv);
     virtual ~ObjectData();
 };
 
 class V8ObjectData : public ObjectData {
 public:
-    V8ObjectData(V8Context* context_, Handle<Object> object_, SV* sv_);
+    V8ObjectData(V8Context* context_, Local<Object> object_, SV* sv_);
 
     static MGVTBL vtable;
     static int svt_free(pTHX_ SV*, MAGIC*);
@@ -80,16 +80,26 @@ class PerlObjectData : public ObjectData {
     size_t bytes;
 
 public:
-    PerlObjectData(V8Context* context_, Handle<Object> object_, SV* sv_);
+    PerlObjectData(V8Context* context_, Local<Object> object_, SV* sv_);
     virtual ~PerlObjectData();
 
     virtual size_t size();
     void add_size(size_t bytes_);
 
-    static void destroy(Persistent<Value> object, void *data);
+    static void weakCallback(const WeakCallbackInfo<PerlObjectData> &data);
 };
 
 typedef map<int, ObjectData*> ObjectDataMap;
+
+class ArrayBufferAllocator : public ArrayBuffer::Allocator {
+ public:
+  virtual void* Allocate(size_t length) {
+    void* data = AllocateUninitialized(length);
+    return data == NULL ? data : memset(data, 0, length);
+  }
+  virtual void* AllocateUninitialized(size_t length) { return malloc(length); }
+  virtual void Free(void* data, size_t) { free(data); }
+};
 
 class V8Context {
     public:
@@ -109,10 +119,8 @@ class V8Context {
         void set_flags_from_string(char *str);
         void name_global(const char *str);
 
-        Handle<Value> sv2v8(SV*);
-        SV*           v82sv(Handle<Value>);
-
-        Persistent<Context> context;
+        Local<Value> sv2v8(SV*);
+        SV*           v82sv(Local<Value>);
 
         void register_object(ObjectData* data);
         void remove_object(ObjectData* data);
@@ -121,31 +129,38 @@ class V8Context {
 
         bool enable_wantarray;
 
+        Isolate* isolate;
+        static Platform* platform;
+        ArrayBufferAllocator *allocator;
+        Persistent<Context> context;
+        Local<Value> check_perl_error();
+        Local<Context> GlobalContext();
+
     private:
-        Handle<Value>    sv2v8(SV*, HandleMap& seen);
-        SV*              v82sv(Handle<Value>, SvMap& seen);
+        Local<Value> sv2v8(SV*, HandleMap& seen);
+        SV*              v82sv(Local<Value>, SvMap& seen);
 
-        Handle<Value>    rv2v8(SV*, HandleMap& seen);
-        Handle<Array>    av2array(AV*, HandleMap& seen, long ptr);
-        Handle<Object>   hv2object(HV*, HandleMap& seen, long ptr);
-        Handle<Object>   cv2function(CV*);
-        Handle<String>   sv2v8str(SV* sv);
-        Handle<Object>   blessed2object(SV *sv);
+        Local<Value> rv2v8(SV*, HandleMap& seen);
+        Local<Array> av2array(AV*, HandleMap& seen, long ptr);
+        Local<Object>   hv2object(HV*, HandleMap& seen, long ptr);
+        Local<Object> cv2function(CV*);
+        Local<String> sv2v8str(SV* sv);
+        Local<Object>   blessed2object(SV *sv);
 
-        SV* array2sv(Handle<Array>, SvMap& seen);
-        SV* object2sv(Handle<Object>, SvMap& seen);
-        SV* object2blessed(Handle<Object>);
-        SV* function2sv(Handle<Function>);
+        SV* array2sv(Local<Array>, SvMap& seen);
+        SV* object2sv(Local<Object>, SvMap& seen);
+        SV* object2blessed(Local<Object>);
+        SV* function2sv(Local<Function>);
 
         Persistent<String> string_wrap;
 
-        void fill_prototype(Handle<Object> prototype, HV* stash);
-        Handle<Object> get_prototype(SV* sv);
+        void fill_prototype(Local<Object> prototype, HV* stash);
+        Local<Object> get_prototype(SV* sv);
 
         ObjectMap prototypes;
 
         ObjectDataMap seen_perl;
-        SV* seen_v8(Handle<Object> object);
+        SV* seen_v8(Local<Object> object);
 
         int time_limit_;
         string bless_prefix;

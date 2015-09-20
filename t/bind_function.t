@@ -3,6 +3,7 @@ use Test::More;
 use JavaScript::V8;
 use strict;
 use warnings;
+use Test::More tests => 10;
 
 my $context = JavaScript::V8::Context->new();
 

@@ -16,17 +16,46 @@ using namespace v8;
 using namespace std;
 
 int V8Context::number = 0;
+Platform* V8Context::platform = NULL;
+
+#define V8_STRING(c_str) String::NewFromUtf8(isolate, c_str, NewStringType::kNormal).ToLocalChecked()
+#define V8_STRING_ISOLATE(isolate, c_str) String::NewFromUtf8(isolate, c_str, NewStringType::kNormal).ToLocalChecked()
+
+template <class TypeName>
+inline Local<TypeName> StrongPersistentToLocal(
+    const Persistent<TypeName>& persistent) {
+  return *reinterpret_cast<Local<TypeName>*>(
+      const_cast<Persistent<TypeName>*>(&persistent));
+}
+
+template <class TypeName>
+inline Local<TypeName> WeakPersistentToLocal(
+    Isolate* isolate,
+    const Persistent<TypeName>& persistent) {
+  return Local<TypeName>::New(isolate, persistent);
+}
+
+template <class TypeName>
+inline Local<TypeName> PersistentToLocal(
+    Isolate* isolate,
+    const Persistent<TypeName>& persistent) {
+  if (persistent.IsWeak()) {
+    return WeakPersistentToLocal(isolate, persistent);
+  } else {
+    return StrongPersistentToLocal(persistent);
+  }
+}
 
 void set_perl_error(const TryCatch& try_catch) {
-    Handle<Message> msg = try_catch.Message();
+    Local<Message> msg = try_catch.Message();
 
     char message[1024];
     snprintf(
         message,
         1024,
         "%s at %s:%d:%d\n",
-        *(String::Utf8Value(try_catch.Exception())),
-        !msg.IsEmpty() ? *(String::AsciiValue(msg->GetScriptResourceName())) : "eval",
+        (try_catch.HasTerminated() ? "timeout" : *(String::Utf8Value(try_catch.Exception()))),
+        !msg.IsEmpty() ? *(String::Utf8Value(msg->GetScriptResourceName())) : "eval",
         !msg.IsEmpty() ? msg->GetLineNumber() : 0,
         !msg.IsEmpty() ? msg->GetStartColumn(): 0
     );
@@ -35,21 +64,21 @@ void set_perl_error(const TryCatch& try_catch) {
     sv_utf8_upgrade(ERRSV);
 }
 
-Handle<Value>
-check_perl_error() {
+Local<Value>
+V8Context::check_perl_error() {
     if (!SvOK(ERRSV))
-        return Handle<Value>();
+        return Local<Value>();
 
     const char *err = SvPV_nolen(ERRSV);
 
     if (err && strlen(err) > 0) {
-        Handle<String> error = String::New(err, strlen(err) - 1); // no newline
+        Local<String> error = V8_STRING(err);
         sv_setsv(ERRSV, &PL_sv_no);
-        Handle<Value> v = ThrowException(Exception::Error(error));
+        Local<Value> v = isolate->ThrowException(Exception::Error(error));
         return v;
     }
 
-    return Handle<Value>();
+    return Local<Value>();
 }
 
 // Internally-used wrapper around coderefs
@@ -100,7 +129,7 @@ calculate_size(SV *sv) {
     PUTBACK;
 
 #define CONVERT_PERL_RESULT() \
-    Handle<Value> error = check_perl_error(); \
+    Local<Value> error = context->check_perl_error(); \
 \
     if (!error.IsEmpty()) { \
         FREETMPS; \
@@ -109,7 +138,7 @@ calculate_size(SV *sv) {
     } \
     SPAGAIN; \
 \
-    Handle<Value> v = context->sv2v8(POPs); \
+    Local<Value> v = context->sv2v8(POPs); \
 \
     PUTBACK; \
     FREETMPS; \
@@ -117,7 +146,7 @@ calculate_size(SV *sv) {
 \
     return v;
 
-void SvMap::add(Handle<Object> object, long ptr) {
+void SvMap::add(Local<Object> object, long ptr) {
     objects.insert(
         pair<int, SimpleObjectData*>(
             object->GetIdentityHash(),
@@ -126,7 +155,7 @@ void SvMap::add(Handle<Object> object, long ptr) {
     );
 }
 
-SV* SvMap::find(Handle<Object> object) {
+SV* SvMap::find(Local<Object> object) {
     int hash = object->GetIdentityHash();
 
     for (sv_map::const_iterator it = objects.find(hash); it != objects.end(), it->first == hash; it++)
@@ -136,11 +165,11 @@ SV* SvMap::find(Handle<Object> object) {
     return NULL;
 }
 
-ObjectData::ObjectData(V8Context* context_, Handle<Object> object_, SV* sv_)
+ObjectData::ObjectData(V8Context* context_, Local<Object> object_, SV* sv_)
     : context(context_)
-    , object(Persistent<Object>::New(object_))
     , sv(sv_)
 {
+    object.Reset(context_->isolate, object_);
     if (!sv) return;
 
     ptr = PTR2IV(sv);
@@ -149,11 +178,13 @@ ObjectData::ObjectData(V8Context* context_, Handle<Object> object_, SV* sv_)
 }
 
 ObjectData::~ObjectData() {
-    if (context) context->remove_object(this);
-    object.Dispose();
+    if (context) {
+        context->remove_object(this);
+        object.Reset();
+    }
 }
 
-PerlObjectData::PerlObjectData(V8Context* context_, Handle<Object> object_, SV* sv_)
+PerlObjectData::PerlObjectData(V8Context* context_, Local<Object> object_, SV* sv_)
     : ObjectData(context_, object_, sv_)
     , bytes(size())
 {
@@ -162,13 +193,17 @@ PerlObjectData::PerlObjectData(V8Context* context_, Handle<Object> object_, SV* 
 
     SvREFCNT_inc(sv);
     add_size(calculate_size(sv));
-    ptr = PTR2IV(sv);
 
-    object.MakeWeak(this, PerlObjectData::destroy);
+    object.SetWeak(this, weakCallback, WeakCallbackType::kParameter);
 }
 
 size_t PerlObjectData::size() {
     return sizeof(PerlObjectData);
+}
+
+void PerlObjectData::weakCallback(const WeakCallbackInfo<PerlObjectData> &data) {
+    PerlObjectData *parameter = data.GetParameter();
+    delete parameter;
 }
 
 PerlObjectData::~PerlObjectData() {
@@ -176,7 +211,7 @@ PerlObjectData::~PerlObjectData() {
     SvREFCNT_dec((SV*)sv);
 }
 
-V8ObjectData::V8ObjectData(V8Context* context_, Handle<Object> object_, SV* sv_)
+V8ObjectData::V8ObjectData(V8Context* context_, Local<Object> object_, SV* sv_)
     : ObjectData(context_, object_, sv_)
 {
     SV *iv = newSViv((IV) this);
@@ -197,10 +232,6 @@ int V8ObjectData::svt_free(pTHX_ SV* sv, MAGIC* mg) {
     return 0;
 };
 
-void PerlObjectData::destroy(Persistent<Value> object, void *data) {
-    delete static_cast<PerlObjectData*>(data);
-}
-
 ObjectData* sv_object_data(SV* sv) {
     if (MAGIC *mg = mg_find(sv, PERL_MAGIC_ext)) {
         if (mg->mg_virtual == &V8ObjectData::vtable) {
@@ -212,41 +243,44 @@ ObjectData* sv_object_data(SV* sv) {
 
 class V8FunctionData : public V8ObjectData {
 public:
-    V8FunctionData(V8Context* context_, Handle<Object> object_, SV* sv_)
+    V8FunctionData(V8Context* context_, Local<Object> object_, SV* sv_)
         : V8ObjectData(context_, object_, sv_)
-        , returns_list(object_->Has(String::New("__perlReturnsList")))
+        , returns_list(object_->Has(V8_STRING_ISOLATE(context->isolate, "__perlReturnsList")))
     { }
 
     bool returns_list;
 };
+
 
 class PerlFunctionData : public PerlObjectData {
 private:
     SV *rv;
 
 protected:
-    virtual Handle<Value> invoke(const Arguments& args);
+    virtual Local<Value> invoke(const FunctionCallbackInfo<Value> &args);
     virtual size_t size();
 
 public:
     PerlFunctionData(V8Context* context_, SV *cv)
         : PerlObjectData(
               context_,
-              Handle<Object>::Cast(
-                  context_->make_function->Call(
-                      context_->context->Global(),
+              Local<Object>::Cast(
+                  StrongPersistentToLocal(context_->make_function)->Call(
+                      context_->isolate->GetCurrentContext()->Global(),
                       1,
-                      &External::Wrap(this)
+                      &Local<Value>::Cast(External::New(context_->isolate, this))
                   )
               ),
               cv
           )
        , rv(cv ? newRV_noinc(cv) : NULL)
-    { }
+    {
+    }
 
-    static Handle<Value> v8invoke(const Arguments& args) {
-        PerlFunctionData* data = static_cast<PerlFunctionData*>(External::Unwrap(args[0]));
-        return data->invoke(args);
+    static void v8invoke(const FunctionCallbackInfo<Value>& args) {
+        PerlFunctionData* data = static_cast<PerlFunctionData*>(Local<External>::Cast(args[0])->Value());
+
+        args.GetReturnValue().Set(data->invoke(args));
     }
 };
 
@@ -256,11 +290,10 @@ size_t PerlFunctionData::size() {
 
 void PerlObjectData::add_size(size_t bytes_) {
     bytes += bytes_;
-    V8::AdjustAmountOfExternalAllocatedMemory(bytes_);
+    context->isolate->AdjustAmountOfExternalAllocatedMemory(bytes_);
 }
 
-Handle<Value>
-PerlFunctionData::invoke(const Arguments& args) {
+Local<Value> PerlFunctionData::invoke(const FunctionCallbackInfo<Value>& args) {
     SETUP_PERL_CALL();
     int count = call_sv(rv, G_SCALAR | G_EVAL);
     CONVERT_PERL_RESULT();
@@ -269,7 +302,7 @@ PerlFunctionData::invoke(const Arguments& args) {
 class PerlMethodData : public PerlFunctionData {
 private:
     string name;
-    virtual Handle<Value> invoke(const Arguments& args);
+    virtual Local<Value> invoke(const FunctionCallbackInfo<Value> &args);
     virtual size_t size();
 
 public:
@@ -279,8 +312,7 @@ public:
     { }
 };
 
-Handle<Value>
-PerlMethodData::invoke(const Arguments& args) {
+Local<Value> PerlMethodData::invoke(const FunctionCallbackInfo<Value>& args) {
     SETUP_PERL_CALL(mXPUSHs(context->v82sv(args.This())))
     int count = call_method(name.c_str(), G_SCALAR | G_EVAL);
     CONVERT_PERL_RESULT()
@@ -302,20 +334,35 @@ V8Context::V8Context(
       bless_prefix(bless_prefix_),
       enable_blessing(enable_blessing_)
 {
+
     V8::SetFlagsFromString(flags, strlen(flags));
-    context = Context::New();
+    if (!platform) {
+        V8::InitializeICU();
+        platform = platform::CreateDefaultPlatform();
+        V8::InitializePlatform(platform);
+        V8::Initialize();
+    }
 
-    Context::Scope context_scope(context);
-    HandleScope handle_scope;
+    // Create a new Isolate and make it the current one.
+    allocator = new ArrayBufferAllocator();
+    Isolate::CreateParams create_params;
+    create_params.array_buffer_allocator = allocator;
+    isolate = Isolate::New(create_params);
+    isolate->Enter();
+    HandleScope handle_scope(isolate);
+    Local<Context> localContext = Context::New(isolate);
+    context.Reset(isolate, localContext);
 
-    Local<FunctionTemplate> tmpl = FunctionTemplate::New(PerlFunctionData::v8invoke);
-    context->Global()->Set(
-        String::New("__perlFunctionWrapper"),
+    Context::Scope context_scope(localContext);
+
+    Local<FunctionTemplate> tmpl = FunctionTemplate::New(isolate, PerlFunctionData::v8invoke);
+    localContext->Global()->Set(
+        V8_STRING("__perlFunctionWrapper"),
         tmpl->GetFunction()
     );
 
-    Handle<Script> script = Script::Compile(
-        String::New(
+    Local<Script> script = Script::Compile(
+        V8_STRING(
             "(function(wrap) {"
             "    return function() {"
             "        var args = Array.prototype.slice.call(arguments);"
@@ -325,23 +372,24 @@ V8Context::V8Context(
             "})"
         )
     );
-    make_function = Persistent<Function>::New(Handle<Function>::Cast(script->Run()));
+    make_function.Reset(isolate, Local<Function>::Cast(script->Run()));
 
-    string_wrap = Persistent<String>::New(String::New("wrap"));
+    string_wrap.Reset(isolate, V8_STRING("wrap"));
 
     number++;
 }
 
 void V8Context::register_object(ObjectData* data) {
     seen_perl[data->ptr] = data;
-    data->object->SetHiddenValue(string_wrap, External::Wrap(data));
+    PersistentToLocal(isolate, data->object)->SetHiddenValue(StrongPersistentToLocal(string_wrap), External::New(isolate, data));
 }
 
 void V8Context::remove_object(ObjectData* data) {
     ObjectDataMap::iterator it = seen_perl.find(data->ptr);
     if (it != seen_perl.end())
         seen_perl.erase(it);
-    data->object->DeleteHiddenValue(string_wrap);
+    // is it ok?
+//    PersistentToLocal(isolate, data->object)->DeleteHiddenValue(StrongPersistentToLocal(string_wrap));
 }
 
 V8Context::~V8Context() {
@@ -351,42 +399,58 @@ V8Context::~V8Context() {
     seen_perl.clear();
 
     for (ObjectMap::iterator it = prototypes.begin(); it != prototypes.end(); it++) {
-      it->second.Dispose();
+      it->second->Reset();
+      delete it->second;
     }
-    context.Dispose();
-    while(!V8::IdleNotification()); // force garbage collection
+    context.Reset();
+    isolate->Exit();
+    isolate->Dispose();
+// fix it?
+//    V8::Dispose();
+//    V8::ShutdownPlatform();
+//    delete platform;
+    delete allocator;
+//    while(!IdleNotification()); // force garbage collection
+}
+
+Local<Context> V8Context::GlobalContext() {
+    return StrongPersistentToLocal(context);
 }
 
 void
 V8Context::bind(const char *name, SV *thing) {
-    HandleScope scope;
-    Context::Scope context_scope(context);
+    HandleScope scope(isolate);
+    Local<Context> local_context(GlobalContext());
+    Context::Scope context_scope(local_context);
 
-    context->Global()->Set(String::New(name), sv2v8(thing));
+    local_context->Global()->Set(String::NewFromUtf8(isolate, name), sv2v8(thing));
 }
 
 void
 V8Context::bind_ro(const char *name, SV *thing) {
-    HandleScope scope;
-    Context::Scope context_scope(context);
+    HandleScope scope(isolate);
+    Local<Context> local_context(GlobalContext());
+    Context::Scope context_scope(local_context);
 
-    context->Global()->ForceSet(String::New(name), sv2v8(thing),
-        v8::PropertyAttribute(v8::ReadOnly | v8::DontDelete));
+    local_context->Global()->ForceSet(String::NewFromUtf8(isolate, name), sv2v8(thing),
+        PropertyAttribute(ReadOnly | DontDelete));
 }
 
 void V8Context::name_global(const char *name) {
-    HandleScope scope;
-    Context::Scope context_scope(context);
+    HandleScope scope(isolate);
+    Local<Context> local_context(GlobalContext());
+    Context::Scope context_scope(local_context);
 
-    context->Global()->ForceSet(String::New(name), context->Global(),
-        v8::PropertyAttribute(v8::ReadOnly | v8::DontDelete));
+    local_context->Global()->ForceSet(String::NewFromUtf8(isolate, name), local_context->Global(),
+        PropertyAttribute(ReadOnly | DontDelete));
 }
 
 // I fucking hate pthreads, this lacks error handling, but hopefully works.
 class thread_canceller {
 public:
-    thread_canceller(int sec)
+    thread_canceller(Isolate* isolate, int sec)
         : sec_(sec)
+        , isolate_(isolate)
     {
         if (sec_) {
             pthread_cond_init(&cond_, NULL);
@@ -419,7 +483,7 @@ private:
         ts.tv_nsec = tv.tv_usec * 1000;
 
         if (pthread_cond_timedwait(&me->cond_, &me->mutex_, &ts) == ETIMEDOUT) {
-            V8::TerminateExecution();
+            me->isolate_->TerminateExecution();
         }
         pthread_mutex_unlock(&me->mutex_);
         return NULL;
@@ -429,27 +493,30 @@ private:
     pthread_cond_t cond_;
     pthread_mutex_t mutex_;
     int sec_;
+    Isolate* isolate_;
 };
 
 SV*
 V8Context::eval(SV* source, SV* origin) {
-    HandleScope handle_scope;
-    TryCatch try_catch;
-    Context::Scope context_scope(context);
+    HandleScope scope(isolate);
+    Local<Context> local_context(GlobalContext());
+    Context::Scope context_scope(local_context);
+
+    TryCatch try_catch(isolate);
 
     // V8 expects everything in UTF-8, ensure SVs are upgraded.
     sv_utf8_upgrade(source);
-    Handle<Script> script = Script::Compile(
+    Local<Script> script = Script::Compile(
         sv2v8str(source),
-        origin ? sv2v8str(origin) : String::New("eval")
+        origin ? sv2v8str(origin) : String::NewFromUtf8(isolate, "eval")
     );
 
     if (try_catch.HasCaught()) {
         set_perl_error(try_catch);
         return &PL_sv_undef;
     } else {
-        thread_canceller canceller(time_limit_);
-        Handle<Value> val = script->Run();
+        thread_canceller canceller(isolate, time_limit_);
+        Local<Value> val = script->Run();
 
         if (val.IsEmpty()) {
             set_perl_error(try_catch);
@@ -464,52 +531,52 @@ V8Context::eval(SV* source, SV* origin) {
     }
 }
 
-Handle<Value>
+Local<Value>
 V8Context::sv2v8(SV *sv, HandleMap& seen) {
     if (SvROK(sv))
         return rv2v8(sv, seen);
     if (SvPOK(sv)) {
         // Upgrade string to UTF-8 if needed
         char *utf8 = SvPVutf8_nolen(sv);
-        return String::New(utf8, SvCUR(sv));
+        return String::NewFromUtf8(isolate, utf8, NewStringType::kNormal, SvCUR(sv)).ToLocalChecked();
     }
     if (SvIOK(sv)) {
         IV v = SvIV(sv);
-        return (v <= INT32_MAX && v >= INT32_MIN) ? (Handle<Number>)Integer::New(v) : Number::New(SvNV(sv));
+        return (v <= INT32_MAX && v >= INT32_MIN) ? (Local<Number>)Integer::New(isolate, v) : Number::New(isolate, SvNV(sv));
     }
     if (SvNOK(sv))
-        return Number::New(SvNV(sv));
+        return Number::New(isolate, SvNV(sv));
     if (!SvOK(sv))
-        return Undefined();
+        return Undefined(isolate);
 
     warn("Unknown sv type in sv2v8");
-    return Undefined();
+    return Undefined(isolate);
 }
 
-Handle<Value>
+Local<Value>
 V8Context::sv2v8(SV *sv) {
     HandleMap seen;
     return sv2v8(sv, seen);
 }
 
-Handle<String> V8Context::sv2v8str(SV* sv)
+Local<String> V8Context::sv2v8str(SV* sv)
 {
     // Upgrade string to UTF-8 if needed
     char *utf8 = SvPVutf8_nolen(sv);
-    return String::New(utf8, SvCUR(sv));
+    return String::NewFromUtf8(isolate, utf8, NewStringType::kNormal, SvCUR(sv)).ToLocalChecked();
 }
 
-SV* V8Context::seen_v8(Handle<Object> object) {
-    Handle<Value> wrap = object->GetHiddenValue(string_wrap);
+SV* V8Context::seen_v8(Local<Object> object) {
+    Local<Value> wrap = object->GetHiddenValue(StrongPersistentToLocal(string_wrap));
     if (wrap.IsEmpty())
         return NULL;
 
-    ObjectData* data = (ObjectData*)External::Unwrap(wrap);
+    ObjectData* data = (ObjectData*)(Local<External>::Cast(wrap)->Value());
     return newRV(data->sv);
 }
 
 SV *
-V8Context::v82sv(Handle<Value> value, SvMap& seen) {
+V8Context::v82sv(Local<Value> value, SvMap& seen) {
     if (value->IsUndefined())
         return &PL_sv_undef;
 
@@ -533,13 +600,13 @@ V8Context::v82sv(Handle<Value> value, SvMap& seen) {
     }
 
     if (value->IsArray() || value->IsObject() || value->IsFunction()) {
-        Handle<Object> object = value->ToObject();
+        Local<Object> object = value->ToObject();
 
         if (SV *cached = seen_v8(object))
             return cached;
 
         if (value->IsFunction()) {
-            Handle<Function> fn = Handle<Function>::Cast(value);
+            Local<Function> fn = Local<Function>::Cast(value);
             return function2sv(fn);
         }
 
@@ -547,12 +614,12 @@ V8Context::v82sv(Handle<Value> value, SvMap& seen) {
             return cached;
 
         if (value->IsArray()) {
-            Handle<Array> array = Handle<Array>::Cast(value);
+            Local<Array> array = Local<Array>::Cast(value);
             return array2sv(array, seen);
         }
 
         if (value->IsObject()) {
-            Handle<Object> object = Handle<Object>::Cast(value);
+            Local<Object> object = Local<Object>::Cast(value);
             return object2sv(object, seen);
         }
     }
@@ -562,27 +629,27 @@ V8Context::v82sv(Handle<Value> value, SvMap& seen) {
 }
 
 SV *
-V8Context::v82sv(Handle<Value> value) {
+V8Context::v82sv(Local<Value> value) {
     SvMap seen;
     return v82sv(value, seen);
 }
 
 void
-V8Context::fill_prototype(Handle<Object> prototype, HV* stash) {
+V8Context::fill_prototype(Local<Object> prototype, HV* stash) {
     HE *he;
     while (he = hv_iternext(stash)) {
         SV *key = HeSVKEY_force(he);
-        Local<String> name = String::New(SvPV_nolen(key));
+        Local<String> name = String::NewFromUtf8(isolate, SvPV_nolen(key));
 
         if (prototype->Has(name))
             continue;
 
-        prototype->Set(name, (new PerlMethodData(this, SvPV_nolen(key)))->object);
+        prototype->Set(name, PersistentToLocal(isolate, (new PerlMethodData(this, SvPV_nolen(key)))->object));
     }
 }
 
 #if PERL_VERSION > 8
-Handle<Object>
+Local<Object>
 V8Context::get_prototype(SV *sv) {
     HV *stash = SvSTASH(sv);
     char *package = HvNAME(stash);
@@ -590,14 +657,15 @@ V8Context::get_prototype(SV *sv) {
     std::string pkg(package);
     ObjectMap::iterator it;
 
-    Persistent<Object> prototype;
+    Local<Object> prototype = Object::New(isolate);
 
     it = prototypes.find(pkg);
     if (it != prototypes.end()) {
-        prototype = it->second;
+        prototype = Local<Object>::New(isolate, *it->second);
     }
     else {
-        prototype = prototypes[pkg] = Persistent<Object>::New(Object::New());
+        prototype = Object::New(isolate);
+        prototypes[pkg] = new Persistent<Object>(isolate, prototype);
 
         if (AV *isa = mro_get_linear_isa(stash)) {
             for (int i = 0; i <= av_len(isa); i++) {
@@ -612,7 +680,7 @@ V8Context::get_prototype(SV *sv) {
 }
 #endif
 
-Handle<Value>
+Local<Value>
 V8Context::rv2v8(SV *rv, HandleMap& seen) {
     SV* sv = SvRV(rv);
     long ptr = PTR2IV(sv);
@@ -620,7 +688,7 @@ V8Context::rv2v8(SV *rv, HandleMap& seen) {
     {
         ObjectDataMap::iterator it = seen_perl.find(ptr);
         if (it != seen_perl.end())
-            return it->second->object;
+            return PersistentToLocal(isolate, it->second->object);
     }
 
     {
@@ -646,54 +714,54 @@ V8Context::rv2v8(SV *rv, HandleMap& seen) {
         return cv2function((CV*)sv);
 
     warn("Unknown reference type in sv2v8()");
-    return Undefined();
+    return Undefined(isolate);
 }
 
 #if PERL_VERSION > 8
-Handle<Object>
+Local<Object>
 V8Context::blessed2object(SV *sv) {
-    Handle<Object> object = Object::New();
+    Local<Object> object = Object::New(isolate);
     object->SetPrototype(get_prototype(sv));
 
-    return (new PerlObjectData(this, object, sv))->object;
+    return PersistentToLocal(isolate, (new PerlObjectData(this, object, sv))->object);
 }
 #endif
 
-Handle<Array>
+Local<Array>
 V8Context::av2array(AV *av, HandleMap& seen, long ptr) {
     I32 i, len = av_len(av) + 1;
-    Handle<Array> array = Array::New(len);
+    Local<Array> array = Array::New(isolate, len);
     seen[ptr] = array;
     for (i = 0; i < len; i++) {
         if (SV** sv = av_fetch(av, i, 0)) {
-            array->Set(Integer::New(i), sv2v8(*sv, seen));
+            array->Set(Integer::New(isolate, i), sv2v8(*sv, seen));
         }
     }
     return array;
 }
 
-Handle<Object>
+Local<Object>
 V8Context::hv2object(HV *hv, HandleMap& seen, long ptr) {
     I32 len;
     char *key;
     SV *val;
 
     hv_iterinit(hv);
-    Handle<Object> object = Object::New();
+    Local<Object> object = Object::New(isolate);
     seen[ptr] = object;
     while (val = hv_iternextsv(hv, &key, &len)) {
-        object->Set(String::New(key, len), sv2v8(val, seen));
+        object->Set(String::NewFromUtf8(isolate, key, NewStringType::kNormal, len).ToLocalChecked(), sv2v8(val, seen));
     }
     return object;
 }
 
-Handle<Object>
+Local<Object>
 V8Context::cv2function(CV *cv) {
-    return (new PerlFunctionData(this, (SV*)cv))->object;
+    return PersistentToLocal(isolate, (new PerlFunctionData(this, (SV*)cv))->object);
 }
 
 SV*
-V8Context::array2sv(Handle<Array> array, SvMap& seen) {
+V8Context::array2sv(Local<Array> array, SvMap& seen) {
     AV *av = newAV();
     SV *rv = newRV_noinc((SV*)av);
     SvREFCNT_inc(rv);
@@ -701,15 +769,15 @@ V8Context::array2sv(Handle<Array> array, SvMap& seen) {
     seen.add(array, PTR2IV(av));
 
     for (int i = 0; i < array->Length(); i++) {
-        Handle<Value> elementVal = array->Get( Integer::New( i ) );
+        Local<Value> elementVal = array->Get(Integer::New(isolate, i));
         av_push(av, v82sv(elementVal, seen));
     }
     return rv;
 }
 
 SV *
-V8Context::object2sv(Handle<Object> obj, SvMap& seen) {
-    if (enable_blessing && obj->Has(String::New("__perlPackage"))) {
+V8Context::object2sv(Local<Object> obj, SvMap& seen) {
+    if (enable_blessing && obj->Has(String::NewFromUtf8(isolate, "__perlPackage"))) {
         return object2blessed(obj);
     }
 
@@ -721,7 +789,7 @@ V8Context::object2sv(Handle<Object> obj, SvMap& seen) {
 
     Local<Array> properties = obj->GetPropertyNames();
     for (int i = 0; i < properties->Length(); i++) {
-        Local<Integer> propertyIndex = Integer::New( i );
+        Local<Integer> propertyIndex = Integer::New(isolate, i);
         Local<String> propertyName = Local<String>::Cast( properties->Get( propertyIndex ) );
         String::Utf8Value propertyNameUTF8( propertyName );
 
@@ -758,42 +826,45 @@ my_gv_setsv(pTHX_ GV* const gv, SV* const sv){
         /* We have to do all this inside a block so that all the proper \
          * destuctors are called if we need to croak. If we just croak in the \
          * middle of the block, v8 will segfault at program exit. */ \
-        TryCatch        try_catch; \
-        HandleScope     scope; \
         V8FunctionData* data = (V8FunctionData*)sv_object_data((SV*)cv); \
         if (data->context) { \
-        V8Context      *self = data->context; \
-        Handle<Context> ctx  = self->context; \
-        Context::Scope  context_scope(ctx); \
-        Handle<Value>   argv[items - ARGS_OFFSET]; \
 \
-        for (I32 i = ARGS_OFFSET; i < items; i++) { \
-            argv[i - ARGS_OFFSET] = self->sv2v8(ST(i)); \
-        }
+            V8Context      *self = data->context; \
+\
+            HandleScope scope(self->isolate); \
+            Local<Context> ctx(self->GlobalContext()); \
+            Context::Scope context_scope(ctx); \
+\
+            TryCatch        try_catch(self->isolate); \
+            Local<Value>   argv[items - ARGS_OFFSET]; \
+\
+            for (I32 i = ARGS_OFFSET; i < items; i++) { \
+                argv[i - ARGS_OFFSET] = self->sv2v8(ST(i)); \
+            }
 
 #define CONVERT_V8_RESULT(POP) \
-        if (try_catch.HasCaught()) { \
-            set_perl_error(try_catch); \
-            die = true; \
-        } \
-        else { \
-            if (data->returns_list && GIMME_V == G_ARRAY && result->IsArray()) { \
-                Handle<Array> array = Handle<Array>::Cast(result); \
-                if (GIMME_V == G_ARRAY) { \
-                    count = array->Length(); \
-                    EXTEND(SP, count - items); \
-                    for (int i = 0; i < count; i++) { \
-                        ST(i) = sv_2mortal(self->v82sv(array->Get(Integer::New(i)))); \
+            if (try_catch.HasCaught()) { \
+                set_perl_error(try_catch); \
+                die = true; \
+            } \
+            else { \
+                if (data->returns_list && GIMME_V == G_ARRAY && result->IsArray()) { \
+                    Local<Array> array = Local<Array>::Cast(result); \
+                    if (GIMME_V == G_ARRAY) { \
+                        count = array->Length(); \
+                        EXTEND(SP, count - items); \
+                        for (int i = 0; i < count; i++) { \
+                            ST(i) = sv_2mortal(self->v82sv(array->Get(Integer::New(self->isolate, i)))); \
+                        } \
+                    } \
+                    else { \
+                        ST(0) = sv_2mortal(newSViv(array->Length())); \
                     } \
                 } \
                 else { \
-                    ST(0) = sv_2mortal(newSViv(array->Length())); \
+                    ST(0) = sv_2mortal(self->v82sv(result)); \
                 } \
             } \
-            else { \
-                ST(0) = sv_2mortal(self->v82sv(result)); \
-            } \
-        } \
         } \
         else {\
             die = true; \
@@ -809,26 +880,26 @@ XSRETURN(count);
 
 XS(v8closure) {
     SETUP_V8_CALL(0)
-    Handle<Value> result = Handle<Function>::Cast(data->object)->Call(ctx->Global(), items, argv);
+    Local<Value> result = Local<Function>::Cast(PersistentToLocal(self->isolate, data->object))->Call(ctx->Global(), items, argv);
     CONVERT_V8_RESULT()
 }
 
 XS(v8method) {
     SETUP_V8_CALL(1)
     V8ObjectData* This = (V8ObjectData*)SvIV((SV*)SvRV(ST(0)));
-    Handle<Value> result = Handle<Function>::Cast(data->object)->Call(This->object, items - 1, argv);
-    CONVERT_V8_RESULT(POPs);
+    Local<Value> result = Local<Function>::Cast(PersistentToLocal(self->isolate, data->object))->Call(PersistentToLocal(self->isolate, This->object), items - 1, argv);
+    CONVERT_V8_RESULT(POPs)
 }
 
 SV*
-V8Context::function2sv(Handle<Function> fn) {
+V8Context::function2sv(Local<Function> fn) {
     CV          *code = newXS(NULL, v8closure, __FILE__);
-    V8ObjectData *data = new V8FunctionData(this, fn->ToObject(), (SV*)code);
+    V8FunctionData *data = new V8FunctionData(this, fn->ToObject(), (SV*)code);
     return newRV_noinc((SV*)code);
 }
 
 SV*
-V8Context::object2blessed(Handle<Object> obj) {
+V8Context::object2blessed(Local<Object> obj) {
     char package[128];
 
     snprintf(
@@ -836,7 +907,7 @@ V8Context::object2blessed(Handle<Object> obj) {
         128,
         "%s%s::N%d",
         bless_prefix.c_str(),
-        *String::AsciiValue(obj->Get(String::New("__perlPackage"))->ToString()),
+        *String::Utf8Value(obj->Get(String::NewFromUtf8(isolate, "__perlPackage"))->ToString()),
         number
     );
 
@@ -860,8 +931,8 @@ V8Context::object2blessed(Handle<Object> obj) {
             CV *code = newXS(NULL, v8method, __FILE__);
             V8ObjectData *data = new V8FunctionData(this, fn, (SV*)code);
 
-            GV* gv = (GV*)*hv_fetch(stash, *String::AsciiValue(name), name->Length(), TRUE);
-            gv_init(gv, stash, *String::AsciiValue(name), name->Length(), GV_ADDMULTI); /* vivify */
+            GV* gv = (GV*)*hv_fetch(stash, *String::Utf8Value(name), name->Length(), TRUE);
+            gv_init(gv, stash, *String::Utf8Value(name), name->Length(), GV_ADDMULTI); /* vivify */
             my_gv_setsv(aTHX_ gv, (SV*)code);
         }
     }
@@ -878,7 +949,7 @@ bool
 V8Context::idle_notification() {
     /*
     HeapStatistics hs;
-    V8::GetHeapStatistics(&hs);
+    GetHeapStatistics(&hs);
     L(
         "%d %d %d\n",
         hs.total_heap_size(),
@@ -886,15 +957,25 @@ V8Context::idle_notification() {
         hs.used_heap_size()
     );
     */
-    return V8::IdleNotification();
+    return isolate->IdleNotification(100);
 }
 
 int
 V8Context::adjust_amount_of_external_allocated_memory(int change_in_bytes) {
-    return V8::AdjustAmountOfExternalAllocatedMemory(change_in_bytes);
+    return isolate->AdjustAmountOfExternalAllocatedMemory(change_in_bytes);
 }
 
 void
 V8Context::set_flags_from_string(char *str) {
     V8::SetFlagsFromString(str, strlen(str));
+    if (strcmp(str, "--expose-gc") == 0) {
+        HandleScope scope(isolate);
+        Local<Context> local_context(GlobalContext());
+        Context::Scope context_scope(local_context);
+
+        Local<Function> gc = FunctionTemplate::New(isolate, [] (const FunctionCallbackInfo<Value>& args) {
+            args.GetIsolate()->RequestGarbageCollectionForTesting(Isolate::kFullGarbageCollection);
+        })->GetFunction();
+        local_context->Global()->Set(String::NewFromUtf8(isolate, "gc"), gc);
+    }
 }
