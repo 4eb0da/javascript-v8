@@ -32,6 +32,8 @@ my %mm = (
     CC                => $CC,
     LD                => '$(CC)',
     depend            => { 'WithV8Context.c' => 'JavaScript-V8-Context.xsp' },
+    # no literal suffix for ppport.h and pad.h
+    CCFLAGS           => '-fpermissive -std=c++0x -Wno-literal-suffix',
 );
 
 if(ExtUtils::MakeMaker->can("VERSION") && ExtUtils::MakeMaker->VERSION(6.46)) {
@@ -42,8 +44,8 @@ if(ExtUtils::MakeMaker->can("VERSION") && ExtUtils::MakeMaker->VERSION(6.46)) {
   };
 }
 
-if(gcc_version($CC) >= 4.5) {
-  $mm{CCFLAGS} = '-fpermissive -std=c++0x';
+if(gcc_version($CC) < 4.7) {
+  die 'g++ 4.7+ required';
 }
 
 WriteMakefile(%mm);

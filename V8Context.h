@@ -116,29 +116,31 @@ class V8Context {
         SV* eval(SV* source, SV* origin = NULL);
         bool idle_notification();
         int adjust_amount_of_external_allocated_memory(int bytes);
-        void set_flags_from_string(char *str);
+        void set_flags_from_string(const char *str);
         void name_global(const char *str);
 
         Local<Value> sv2v8(SV*);
-        SV*           v82sv(Local<Value>);
+        SV*          v82sv(Local<Value>);
+        Local<Value> check_perl_error();
+        void         set_perl_error(const TryCatch& try_catch);
 
         void register_object(ObjectData* data);
         void remove_object(ObjectData* data);
+        Isolate* get_isolate() const;
 
         Persistent<Function> make_function;
+        Persistent<String> perl_returns_list;
 
-        bool enable_wantarray;
+        Local<Context> GlobalContext();
 
+    private:
         Isolate* isolate;
         static Platform* platform;
         ArrayBufferAllocator *allocator;
         Persistent<Context> context;
-        Local<Value> check_perl_error();
-        Local<Context> GlobalContext();
 
-    private:
         Local<Value> sv2v8(SV*, HandleMap& seen);
-        SV*              v82sv(Local<Value>, SvMap& seen);
+        SV*          v82sv(Local<Value>, SvMap& seen);
 
         Local<Value> rv2v8(SV*, HandleMap& seen);
         Local<Array> av2array(AV*, HandleMap& seen, long ptr);
@@ -166,6 +168,7 @@ class V8Context {
         string bless_prefix;
         bool enable_blessing;
         static int number;
+
 };
 
 #endif

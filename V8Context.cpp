@@ -19,7 +19,6 @@ int V8Context::number = 0;
 Platform* V8Context::platform = NULL;
 
 #define V8_STRING(c_str) String::NewFromUtf8(isolate, c_str, NewStringType::kNormal).ToLocalChecked()
-#define V8_STRING_ISOLATE(isolate, c_str) String::NewFromUtf8(isolate, c_str, NewStringType::kNormal).ToLocalChecked()
 
 template <class TypeName>
 inline Local<TypeName> StrongPersistentToLocal(
@@ -46,7 +45,7 @@ inline Local<TypeName> PersistentToLocal(
   }
 }
 
-void set_perl_error(const TryCatch& try_catch) {
+void V8Context::set_perl_error(const TryCatch& try_catch) {
     Local<Message> msg = try_catch.Message();
 
     char message[1024];
@@ -169,7 +168,7 @@ ObjectData::ObjectData(V8Context* context_, Local<Object> object_, SV* sv_)
     : context(context_)
     , sv(sv_)
 {
-    object.Reset(context_->isolate, object_);
+    object.Reset(context->get_isolate(), object_);
     if (!sv) return;
 
     ptr = PTR2IV(sv);
@@ -245,7 +244,7 @@ class V8FunctionData : public V8ObjectData {
 public:
     V8FunctionData(V8Context* context_, Local<Object> object_, SV* sv_)
         : V8ObjectData(context_, object_, sv_)
-        , returns_list(object_->Has(V8_STRING_ISOLATE(context->isolate, "__perlReturnsList")))
+        , returns_list(object_->Has(StrongPersistentToLocal(context->perl_returns_list)))
     { }
 
     bool returns_list;
@@ -266,9 +265,9 @@ public:
               context_,
               Local<Object>::Cast(
                   StrongPersistentToLocal(context_->make_function)->Call(
-                      context_->isolate->GetCurrentContext()->Global(),
+                      context_->get_isolate()->GetCurrentContext()->Global(),
                       1,
-                      &Local<Value>::Cast(External::New(context_->isolate, this))
+                      &Local<Value>::Cast(External::New(context_->get_isolate(), this))
                   )
               ),
               cv
@@ -290,7 +289,7 @@ size_t PerlFunctionData::size() {
 
 void PerlObjectData::add_size(size_t bytes_) {
     bytes += bytes_;
-    context->isolate->AdjustAmountOfExternalAllocatedMemory(bytes_);
+    context->get_isolate()->AdjustAmountOfExternalAllocatedMemory(bytes_);
 }
 
 Local<Value> PerlFunctionData::invoke(const FunctionCallbackInfo<Value>& args) {
@@ -335,7 +334,7 @@ V8Context::V8Context(
       enable_blessing(enable_blessing_)
 {
 
-    V8::SetFlagsFromString(flags, strlen(flags));
+    set_flags_from_string(flags);
     if (!platform) {
         V8::InitializeICU();
         platform = platform::CreateDefaultPlatform();
@@ -372,8 +371,9 @@ V8Context::V8Context(
             "})"
         )
     );
-    make_function.Reset(isolate, Local<Function>::Cast(script->Run()));
 
+    make_function.Reset(isolate, Local<Function>::Cast(script->Run()));
+    perl_returns_list.Reset(isolate, V8_STRING("__perlReturnsList"));
     string_wrap.Reset(isolate, V8_STRING("wrap"));
 
     number++;
@@ -389,7 +389,11 @@ void V8Context::remove_object(ObjectData* data) {
     if (it != seen_perl.end())
         seen_perl.erase(it);
     // is it ok?
-//    PersistentToLocal(isolate, data->object)->DeleteHiddenValue(StrongPersistentToLocal(string_wrap));
+    //    PersistentToLocal(isolate, data->object)->DeleteHiddenValue(StrongPersistentToLocal(string_wrap));
+}
+
+Isolate *V8Context::get_isolate() const {
+    return isolate;
 }
 
 V8Context::~V8Context() {
@@ -830,12 +834,13 @@ my_gv_setsv(pTHX_ GV* const gv, SV* const sv){
         if (data->context) { \
 \
             V8Context      *self = data->context; \
+            Isolate        *isolate = self->get_isolate(); \
 \
-            HandleScope scope(self->isolate); \
+            HandleScope scope(isolate); \
             Local<Context> ctx(self->GlobalContext()); \
             Context::Scope context_scope(ctx); \
 \
-            TryCatch        try_catch(self->isolate); \
+            TryCatch        try_catch(isolate); \
             Local<Value>   argv[items - ARGS_OFFSET]; \
 \
             for (I32 i = ARGS_OFFSET; i < items; i++) { \
@@ -844,7 +849,7 @@ my_gv_setsv(pTHX_ GV* const gv, SV* const sv){
 
 #define CONVERT_V8_RESULT(POP) \
             if (try_catch.HasCaught()) { \
-                set_perl_error(try_catch); \
+                data->context->set_perl_error(try_catch); \
                 die = true; \
             } \
             else { \
@@ -854,7 +859,7 @@ my_gv_setsv(pTHX_ GV* const gv, SV* const sv){
                         count = array->Length(); \
                         EXTEND(SP, count - items); \
                         for (int i = 0; i < count; i++) { \
-                            ST(i) = sv_2mortal(self->v82sv(array->Get(Integer::New(self->isolate, i)))); \
+                            ST(i) = sv_2mortal(self->v82sv(array->Get(Integer::New(isolate, i)))); \
                         } \
                     } \
                     else { \
@@ -880,14 +885,14 @@ XSRETURN(count);
 
 XS(v8closure) {
     SETUP_V8_CALL(0)
-    Local<Value> result = Local<Function>::Cast(PersistentToLocal(self->isolate, data->object))->Call(ctx->Global(), items, argv);
+    Local<Value> result = Local<Function>::Cast(PersistentToLocal(isolate, data->object))->Call(ctx->Global(), items, argv);
     CONVERT_V8_RESULT()
 }
 
 XS(v8method) {
     SETUP_V8_CALL(1)
     V8ObjectData* This = (V8ObjectData*)SvIV((SV*)SvRV(ST(0)));
-    Local<Value> result = Local<Function>::Cast(PersistentToLocal(self->isolate, data->object))->Call(PersistentToLocal(self->isolate, This->object), items - 1, argv);
+    Local<Value> result = Local<Function>::Cast(PersistentToLocal(isolate, data->object))->Call(PersistentToLocal(isolate, This->object), items - 1, argv);
     CONVERT_V8_RESULT(POPs)
 }
 
@@ -966,9 +971,10 @@ V8Context::adjust_amount_of_external_allocated_memory(int change_in_bytes) {
 }
 
 void
-V8Context::set_flags_from_string(char *str) {
+V8Context::set_flags_from_string(const char *str) {
     V8::SetFlagsFromString(str, strlen(str));
-    if (strcmp(str, "--expose-gc") == 0) {
+    // for testing only
+    if (strstr(str, "--expose-gc")) {
         HandleScope scope(isolate);
         Local<Context> local_context(GlobalContext());
         Context::Scope context_scope(local_context);
