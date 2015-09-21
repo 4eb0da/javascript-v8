@@ -121,7 +121,7 @@ calculate_size(SV *sv) {
 \
     PUSHSELF; \
 \
-    for (int i = 1; i < len; i++) { \
+    for (int i = 0; i < len; i++) { \
         SV *arg = context->v82sv(args[i]); \
         mXPUSHs(arg); \
     } \
@@ -189,7 +189,7 @@ PerlObjectData::PerlObjectData(V8Context* context_, Local<Object> object_, SV* s
     : ObjectData(context_, object_, sv_)
     , bytes(size())
 {
-    object.SetWeak(this, weakCallback, WeakCallbackType::kParameter);
+    object.SetWeak(this, weak_callback, WeakCallbackType::kParameter);
 
     // PerlMethodData
     if (!sv)
@@ -203,7 +203,7 @@ size_t PerlObjectData::size() {
     return sizeof(PerlObjectData);
 }
 
-void PerlObjectData::weakCallback(const WeakCallbackInfo<PerlObjectData> &data) {
+void PerlObjectData::weak_callback(const WeakCallbackInfo<PerlObjectData> &data) {
     PerlObjectData *parameter = data.GetParameter();
     delete parameter;
 }
@@ -253,46 +253,32 @@ public:
     bool returns_list;
 };
 
-
-class PerlFunctionData : public PerlObjectData {
-private:
-    SV *rv;
-
-protected:
-    virtual Local<Value> invoke(const FunctionCallbackInfo<Value> &args);
-    virtual size_t size();
-
-public:
-    PerlFunctionData(V8Context* context_, SV *cv)
-        : PerlObjectData(
-              context_,
-              Local<Object>::Cast(
-                  StrongPersistentToLocal(context_->make_function)->Call(
-                      context_->get_isolate()->GetCurrentContext()->Global(),
-                      1,
-                      &Local<Value>::Cast(External::New(context_->get_isolate(), this))
-                  )
-              ),
-              cv
-          )
-       , rv(cv ? newRV_noinc(cv) : NULL)
-    {
-    }
-
-    static void v8invoke(const FunctionCallbackInfo<Value>& args) {
-        PerlFunctionData* data = static_cast<PerlFunctionData*>(Local<External>::Cast(args[0])->Value());
-
-        args.GetReturnValue().Set(data->invoke(args));
-    }
-};
-
-size_t PerlFunctionData::size() {
-    return sizeof(PerlFunctionData);
-}
-
 void PerlObjectData::add_size(size_t bytes_) {
     bytes += bytes_;
     context->get_isolate()->AdjustAmountOfExternalAllocatedMemory(bytes_);
+}
+
+Local<Object> get_function_wrapper(Isolate* isolate, PerlFunctionData* data) {
+    return Local<Object>::Cast(FunctionTemplate::New(isolate, [] (const FunctionCallbackInfo<Value>& args) {
+        PerlFunctionData *data = static_cast<PerlFunctionData*>(Local<External>::Cast(args.Data())->Value());
+
+        args.GetReturnValue().Set(data->invoke(args));
+    }, External::New(isolate, data))->GetFunction());
+}
+
+
+PerlFunctionData::PerlFunctionData(V8Context* context_, SV *cv)
+    : PerlObjectData(
+          context_,
+          get_function_wrapper(context_->get_isolate(), this),
+          cv
+      )
+   , rv(cv ? newRV_noinc(cv) : NULL)
+{
+}
+
+size_t PerlFunctionData::size() {
+    return sizeof(PerlFunctionData);
 }
 
 Local<Value> PerlFunctionData::invoke(const FunctionCallbackInfo<Value>& args) {
@@ -357,25 +343,6 @@ V8Context::V8Context(
 
     Context::Scope context_scope(localContext);
 
-    Local<FunctionTemplate> tmpl = FunctionTemplate::New(isolate, PerlFunctionData::v8invoke);
-    localContext->Global()->Set(
-        V8_STRING("__perlFunctionWrapper"),
-        tmpl->GetFunction()
-    );
-
-    Local<Script> script = Script::Compile(
-        V8_STRING(
-            "(function(wrap) {"
-            "    return function() {"
-            "        var args = Array.prototype.slice.call(arguments);"
-            "        args.unshift(wrap);"
-            "        return __perlFunctionWrapper.apply(this, args)"
-            "    };"
-            "})"
-        )
-    );
-
-    make_function.Reset(isolate, Local<Function>::Cast(script->Run()));
     perl_returns_list.Reset(isolate, V8_STRING("__perlReturnsList"));
     string_wrap.Reset(isolate, V8_STRING("wrap"));
 

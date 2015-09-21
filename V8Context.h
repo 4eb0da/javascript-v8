@@ -86,7 +86,20 @@ public:
     virtual size_t size();
     void add_size(size_t bytes_);
 
-    static void weakCallback(const WeakCallbackInfo<PerlObjectData> &data);
+    static void weak_callback(const WeakCallbackInfo<PerlObjectData> &data);
+};
+
+class PerlFunctionData : public PerlObjectData {
+private:
+    SV *rv;
+
+protected:
+    virtual size_t size();
+
+public:
+    PerlFunctionData(V8Context* context_, SV *cv);
+
+    virtual Local<Value> invoke(const FunctionCallbackInfo<Value> &args);
 };
 
 typedef map<int, ObjectData*> ObjectDataMap;
@@ -128,7 +141,6 @@ class V8Context {
         void remove_object(ObjectData* data);
         Isolate* get_isolate() const;
 
-        Persistent<Function> make_function;
         Persistent<String> perl_returns_list;
 
         Local<Context> GlobalContext();

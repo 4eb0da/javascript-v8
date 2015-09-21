@@ -33,7 +33,7 @@ my %mm = (
     LD                => '$(CC)',
     depend            => { 'WithV8Context.c' => 'JavaScript-V8-Context.xsp' },
     # no literal suffix for ppport.h and pad.h
-    CCFLAGS           => '-fpermissive -std=c++0x -Wno-literal-suffix',
+    CCFLAGS           => '-std=c++0x -Wno-literal-suffix',
 );
 
 if(ExtUtils::MakeMaker->can("VERSION") && ExtUtils::MakeMaker->VERSION(6.46)) {
