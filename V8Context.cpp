@@ -169,7 +169,9 @@ ObjectData::ObjectData(V8Context* context_, Local<Object> object_, SV* sv_)
     , sv(sv_)
 {
     object.Reset(context->get_isolate(), object_);
-    if (!sv) return;
+
+    if (!sv)
+        return;
 
     ptr = PTR2IV(sv);
 
@@ -187,13 +189,14 @@ PerlObjectData::PerlObjectData(V8Context* context_, Local<Object> object_, SV* s
     : ObjectData(context_, object_, sv_)
     , bytes(size())
 {
+    object.SetWeak(this, weakCallback, WeakCallbackType::kParameter);
+
+    // PerlMethodData
     if (!sv)
         return;
 
     SvREFCNT_inc(sv);
     add_size(calculate_size(sv));
-
-    object.SetWeak(this, weakCallback, WeakCallbackType::kParameter);
 }
 
 size_t PerlObjectData::size() {
