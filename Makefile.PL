@@ -34,6 +34,8 @@ my %mm = (
     depend            => { 'WithV8Context.c' => 'JavaScript-V8-Context.xsp' },
     # no literal suffix for ppport.h and pad.h
     CCFLAGS           => '-std=c++0x -Wno-literal-suffix',
+    OPTIMIZE          => '-O3',
+    LDDLFLAGS         => '-shared -O3 -L/usr/local/lib -fstack-protector',
 );
 
 if(ExtUtils::MakeMaker->can("VERSION") && ExtUtils::MakeMaker->VERSION(6.46)) {
