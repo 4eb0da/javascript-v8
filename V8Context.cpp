@@ -654,8 +654,12 @@ V8Context::rv2v8(SV *rv, HandleMap& seen) {
             return it->second;
     }
 
-    if (SvOBJECT(sv))
+    if (SvOBJECT(sv)) {
+        const char *Perl_class = sv_reftype(sv, 1);
+        if (0 == strcmp(Perl_class, "JSON::PP::Boolean"))
+            return Boolean::New(sv_2bool(sv));
         return blessed2object(sv);
+    }
 
     unsigned t = SvTYPE(sv);
 
@@ -667,6 +671,10 @@ V8Context::rv2v8(SV *rv, HandleMap& seen) {
 
     if (t == SVt_PVCV)
         return cv2function((CV*)sv);
+
+    if (t == SVt_IV) {
+        return Integer::New(SvIV(sv));
+    }
 
     warn("Unknown reference type in sv2v8()");
     return Undefined();

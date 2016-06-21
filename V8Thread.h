@@ -1,5 +1,6 @@
 #include <pthread.h>
 #include <iostream>
+#include <memory>
 #include <v8.h>
 
 using namespace std;

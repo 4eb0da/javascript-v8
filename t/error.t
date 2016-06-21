@@ -20,7 +20,8 @@ $context->eval(qq{\nfunction(\{}, 'test2.js');
 like $@, qr{SyntaxError:.* at test2\.js:2}, 'syntax error message contains filename and line number';
 
 eval { $context->eval('(function(f) { throw "js error"; })', 'error.js')->() };
-is $@, 'js error at error.js:1';
+is $@, 'js error at error.js:1 at t/error.t line 22.
+';
 
 $context->eval("throw 'привет'");
 like $@, qr{привет at.*}, 'unicode errors';
