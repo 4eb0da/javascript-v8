@@ -6,13 +6,6 @@ use Devel::CheckLib;
 
 my $V8_DIR = $ENV{V8_DIR};
 
-check_lib_or_exit(
-    lib => ['v8'],
-    $V8_DIR
-        ? ( libpath => $V8_DIR, incpath => "$V8_DIR/include" )
-        : (),
-);
-
 my $CC = 'g++';
 my %mm = (
     NAME              => 'JavaScript::V8',
@@ -22,7 +15,7 @@ my %mm = (
     }, # e.g., Module::Name => 1.1
     ABSTRACT_FROM  => 'lib/JavaScript/V8.pm', # retrieve abstract from module
     AUTHOR         => 'Pawel Murias <pawelmurias@gmail.org>',
-    LIBS              => [($V8_DIR ? "-L$V8_DIR " : '') . '-lv8'], # e.g., '-lm'
+    LIBS              => [($V8_DIR ? "-L$V8_DIR/obj.target/tools/gyp/ " : '') . '-lv8'], # e.g., '-lm'
     DEFINE            => '', # e.g., '-DHAVE_SOMETHING'
     INC               => '-I.' . ($V8_DIR ? " -I$V8_DIR/include" : ''), # e.g., '-I. -I/usr/include/other'
     OBJECT            => '$(O_FILES)', # link all the C files too
