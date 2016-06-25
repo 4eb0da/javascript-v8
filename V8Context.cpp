@@ -18,7 +18,7 @@ using namespace std;
 int V8Context::number = 0;
 Platform* V8Context::platform = NULL;
 
-#define V8_STRING(c_str) String::NewFromUtf8(isolate, c_str, NewStringType::kNormal).ToLocalChecked()
+#define V8_STRING(c_str) String::NewFromUtf8(isolate, c_str, String::kNormalString)
 
 template <class TypeName>
 inline Local<TypeName> StrongPersistentToLocal(
@@ -180,6 +180,8 @@ ObjectData::ObjectData(V8Context* context_, Local<Object> object_, SV* sv_)
 
 ObjectData::~ObjectData() {
     if (context) {
+        Isolate::Scope isolate_scope(context->get_isolate());
+
         context->remove_object(this);
         object.Reset();
     }
@@ -336,7 +338,7 @@ V8Context::V8Context(
     Isolate::CreateParams create_params;
     create_params.array_buffer_allocator = allocator;
     isolate = Isolate::New(create_params);
-    isolate->Enter();
+    Isolate::Scope isolate_scope(isolate);
     HandleScope handle_scope(isolate);
     Local<Context> localContext = Context::New(isolate);
     context.Reset(isolate, localContext);
@@ -367,6 +369,7 @@ Isolate *V8Context::get_isolate() const {
 }
 
 V8Context::~V8Context() {
+    isolate->Enter();
     for (ObjectDataMap::iterator it = seen_perl.begin(); it != seen_perl.end(); it++) {
         it->second->context = NULL;
     }
@@ -393,6 +396,7 @@ Local<Context> V8Context::GlobalContext() {
 
 void
 V8Context::bind(const char *name, SV *thing) {
+    Isolate::Scope isolate_scope(isolate);
     HandleScope scope(isolate);
     Local<Context> local_context(GlobalContext());
     Context::Scope context_scope(local_context);
@@ -402,6 +406,7 @@ V8Context::bind(const char *name, SV *thing) {
 
 void
 V8Context::bind_ro(const char *name, SV *thing) {
+    Isolate::Scope isolate_scope(isolate);
     HandleScope scope(isolate);
     Local<Context> local_context(GlobalContext());
     Context::Scope context_scope(local_context);
@@ -411,6 +416,7 @@ V8Context::bind_ro(const char *name, SV *thing) {
 }
 
 void V8Context::name_global(const char *name) {
+    Isolate::Scope isolate_scope(isolate);
     HandleScope scope(isolate);
     Local<Context> local_context(GlobalContext());
     Context::Scope context_scope(local_context);
@@ -472,6 +478,7 @@ private:
 
 SV*
 V8Context::eval(SV* source, SV* origin) {
+    Isolate::Scope isolate_scope(isolate);
     HandleScope scope(isolate);
     Local<Context> local_context(GlobalContext());
     Context::Scope context_scope(local_context);
@@ -512,7 +519,7 @@ V8Context::sv2v8(SV *sv, HandleMap& seen) {
     if (SvPOK(sv)) {
         // Upgrade string to UTF-8 if needed
         char *utf8 = SvPVutf8_nolen(sv);
-        return String::NewFromUtf8(isolate, utf8, NewStringType::kNormal, SvCUR(sv)).ToLocalChecked();
+        return String::NewFromUtf8(isolate, utf8, String::kNormalString, SvCUR(sv));
     }
     if (SvIOK(sv)) {
         IV v = SvIV(sv);
@@ -537,7 +544,7 @@ Local<String> V8Context::sv2v8str(SV* sv)
 {
     // Upgrade string to UTF-8 if needed
     char *utf8 = SvPVutf8_nolen(sv);
-    return String::NewFromUtf8(isolate, utf8, NewStringType::kNormal, SvCUR(sv)).ToLocalChecked();
+    return String::NewFromUtf8(isolate, utf8, String::kNormalString, SvCUR(sv));
 }
 
 SV* V8Context::seen_v8(Local<Object> object) {
@@ -724,7 +731,7 @@ V8Context::hv2object(HV *hv, HandleMap& seen, long ptr) {
     Local<Object> object = Object::New(isolate);
     seen[ptr] = object;
     while (val = hv_iternextsv(hv, &key, &len)) {
-        object->Set(String::NewFromUtf8(isolate, key, NewStringType::kNormal, len).ToLocalChecked(), sv2v8(val, seen));
+        object->Set(String::NewFromUtf8(isolate, key, String::kNormalString, len), sv2v8(val, seen));
     }
     return object;
 }
@@ -806,11 +813,13 @@ my_gv_setsv(pTHX_ GV* const gv, SV* const sv){
             V8Context      *self = data->context; \
             Isolate        *isolate = self->get_isolate(); \
 \
-            HandleScope scope(isolate); \
+            Isolate::Scope isolate_scope(isolate); \
+\
+            HandleScope    scope(isolate); \
             Local<Context> ctx(self->GlobalContext()); \
             Context::Scope context_scope(ctx); \
 \
-            TryCatch        try_catch(isolate); \
+            TryCatch       try_catch(isolate); \
             Local<Value>   argv[items - ARGS_OFFSET]; \
 \
             for (I32 i = ARGS_OFFSET; i < items; i++) { \
@@ -945,6 +954,7 @@ V8Context::set_flags_from_string(const char *str) {
     V8::SetFlagsFromString(str, strlen(str));
     // for testing only
     if (strstr(str, "--expose-gc")) {
+        Isolate::Scope isolate_scope(isolate);
         HandleScope scope(isolate);
         Local<Context> local_context(GlobalContext());
         Context::Scope context_scope(local_context);
