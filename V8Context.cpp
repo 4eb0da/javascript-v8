@@ -38,11 +38,11 @@ template <class TypeName>
 inline Local<TypeName> PersistentToLocal(
     Isolate* isolate,
     const Persistent<TypeName>& persistent) {
-  if (persistent.IsWeak()) {
-    return WeakPersistentToLocal(isolate, persistent);
-  } else {
-    return StrongPersistentToLocal(persistent);
-  }
+    if (persistent.IsWeak()) {
+        return WeakPersistentToLocal(isolate, persistent);
+    } else {
+        return StrongPersistentToLocal(persistent);
+    }
 }
 
 void V8Context::set_perl_error(const TryCatch& try_catch) {
@@ -169,6 +169,7 @@ ObjectData::ObjectData(V8Context* context_, Local<Object> object_, SV* sv_)
     , sv(sv_)
 {
     object.Reset(context->get_isolate(), object_);
+    destroying = false;
 
     if (!sv)
         return;
@@ -207,6 +208,7 @@ size_t PerlObjectData::size() {
 
 void PerlObjectData::weak_callback(const WeakCallbackInfo<PerlObjectData> &data) {
     PerlObjectData *parameter = data.GetParameter();
+    parameter->destroying = true;
     delete parameter;
 }
 
@@ -360,8 +362,10 @@ void V8Context::remove_object(ObjectData* data) {
     ObjectDataMap::iterator it = seen_perl.find(data->ptr);
     if (it != seen_perl.end())
         seen_perl.erase(it);
-    // is it ok?
-    //    PersistentToLocal(isolate, data->object)->DeleteHiddenValue(StrongPersistentToLocal(string_wrap));
+    if (data->destroying) {
+        return;
+    }
+    PersistentToLocal(isolate, data->object)->DeleteHiddenValue(StrongPersistentToLocal(string_wrap));
 }
 
 Isolate *V8Context::get_isolate() const {
@@ -372,6 +376,7 @@ V8Context::~V8Context() {
     isolate->Enter();
     for (ObjectDataMap::iterator it = seen_perl.begin(); it != seen_perl.end(); it++) {
         it->second->context = NULL;
+        it->second->object.Reset();
     }
     seen_perl.clear();
 
@@ -381,6 +386,7 @@ V8Context::~V8Context() {
     }
     context.Reset();
     isolate->Exit();
+    while (v8::platform::PumpMessageLoop(platform, isolate)) continue;
     isolate->Dispose();
 // fix it?
 //    V8::Dispose();
@@ -390,15 +396,11 @@ V8Context::~V8Context() {
 //    while(!IdleNotification()); // force garbage collection
 }
 
-Local<Context> V8Context::GlobalContext() {
-    return StrongPersistentToLocal(context);
-}
-
 void
 V8Context::bind(const char *name, SV *thing) {
     Isolate::Scope isolate_scope(isolate);
     HandleScope scope(isolate);
-    Local<Context> local_context(GlobalContext());
+    Local<Context> local_context = Local<Context>::New(isolate, context);
     Context::Scope context_scope(local_context);
 
     local_context->Global()->Set(String::NewFromUtf8(isolate, name), sv2v8(thing));
@@ -408,7 +410,7 @@ void
 V8Context::bind_ro(const char *name, SV *thing) {
     Isolate::Scope isolate_scope(isolate);
     HandleScope scope(isolate);
-    Local<Context> local_context(GlobalContext());
+    Local<Context> local_context = Local<Context>::New(isolate, context);
     Context::Scope context_scope(local_context);
 
     local_context->Global()->ForceSet(String::NewFromUtf8(isolate, name), sv2v8(thing),
@@ -418,7 +420,7 @@ V8Context::bind_ro(const char *name, SV *thing) {
 void V8Context::name_global(const char *name) {
     Isolate::Scope isolate_scope(isolate);
     HandleScope scope(isolate);
-    Local<Context> local_context(GlobalContext());
+    Local<Context> local_context = Local<Context>::New(isolate, context);
     Context::Scope context_scope(local_context);
 
     local_context->Global()->ForceSet(String::NewFromUtf8(isolate, name), local_context->Global(),
@@ -480,7 +482,7 @@ SV*
 V8Context::eval(SV* source, SV* origin) {
     Isolate::Scope isolate_scope(isolate);
     HandleScope scope(isolate);
-    Local<Context> local_context(GlobalContext());
+    Local<Context> local_context = Local<Context>::New(isolate, context);
     Context::Scope context_scope(local_context);
 
     TryCatch try_catch(isolate);
@@ -498,6 +500,7 @@ V8Context::eval(SV* source, SV* origin) {
     } else {
         thread_canceller canceller(isolate, time_limit_);
         Local<Value> val = script->Run();
+        while (v8::platform::PumpMessageLoop(platform, isolate)) continue;
 
         if (val.IsEmpty()) {
             set_perl_error(try_catch);
@@ -816,7 +819,7 @@ my_gv_setsv(pTHX_ GV* const gv, SV* const sv){
             Isolate::Scope isolate_scope(isolate); \
 \
             HandleScope    scope(isolate); \
-            Local<Context> ctx(self->GlobalContext()); \
+            Local<Context> ctx = Local<Context>::New(isolate, self->context); \
             Context::Scope context_scope(ctx); \
 \
             TryCatch       try_catch(isolate); \
@@ -865,6 +868,7 @@ XSRETURN(count);
 XS(v8closure) {
     SETUP_V8_CALL(0)
     Local<Value> result = Local<Function>::Cast(PersistentToLocal(isolate, data->object))->Call(ctx->Global(), items, argv);
+    while (v8::platform::PumpMessageLoop(self->platform, isolate)) continue;
     CONVERT_V8_RESULT()
 }
 
@@ -872,6 +876,7 @@ XS(v8method) {
     SETUP_V8_CALL(1)
     V8ObjectData* This = (V8ObjectData*)SvIV((SV*)SvRV(ST(0)));
     Local<Value> result = Local<Function>::Cast(PersistentToLocal(isolate, data->object))->Call(PersistentToLocal(isolate, This->object), items - 1, argv);
+    while (v8::platform::PumpMessageLoop(self->platform, isolate)) continue;
     CONVERT_V8_RESULT(POPs)
 }
 
@@ -956,7 +961,7 @@ V8Context::set_flags_from_string(const char *str) {
     if (strstr(str, "--expose-gc")) {
         Isolate::Scope isolate_scope(isolate);
         HandleScope scope(isolate);
-        Local<Context> local_context(GlobalContext());
+        Local<Context> local_context = Local<Context>::New(isolate, context);
         Context::Scope context_scope(local_context);
 
         Local<Function> gc = FunctionTemplate::New(isolate, [] (const FunctionCallbackInfo<Value>& args) {

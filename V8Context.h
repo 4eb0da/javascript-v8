@@ -63,6 +63,7 @@ public:
     Persistent<Object> object;
     SV* sv;
     long ptr;
+    bool destroying;
 
     ObjectData(V8Context* context_, Local<Object> object_, SV* sv);
     virtual ~ObjectData();
@@ -142,14 +143,12 @@ class V8Context {
         Isolate* get_isolate() const;
 
         Persistent<String> perl_returns_list;
-
-        Local<Context> GlobalContext();
-
-    private:
+        Persistent<Context> context;
         Isolate* isolate;
         static Platform* platform;
+
+    private:
         ArrayBufferAllocator *allocator;
-        Persistent<Context> context;
 
         Local<Value> sv2v8(SV*, HandleMap& seen);
         SV*          v82sv(Local<Value>, SvMap& seen);
